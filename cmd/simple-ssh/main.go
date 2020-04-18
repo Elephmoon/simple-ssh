@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
 )
@@ -12,6 +15,9 @@ import (
 const (
 	defaultSSHKey  = ".ssh/id_rsa"
 	defaultHomeDir = "HOME"
+	inputSpeed     = 14400
+	outputSpeed    = 14400
+	exitCommand    = "exit\n"
 )
 
 var (
@@ -26,12 +32,12 @@ func main() {
 
 	key, err := ioutil.ReadFile(*privateKey)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	clientConfig := &ssh.ClientConfig{
@@ -45,19 +51,56 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	client, err := ssh.Dial("tcp", addr, clientConfig)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	session, err := client.NewSession()
+	defer session.Close()
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
-	data, err := session.CombinedOutput("uname -a")
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	pipeIn, err := session.StdinPipe()
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	fmt.Print(string(data))
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          0,
+		ssh.TTY_OP_ISPEED: inputSpeed,
+		ssh.TTY_OP_OSPEED: outputSpeed,
+	}
+
+	if err := session.RequestPty("xterm", 80, 40, modes); err != nil {
+		log.Fatalf("request for pseudo terminal failed: %s", err)
+	}
+
+	if err := session.Shell(); err != nil {
+		log.Fatalf("failed to start shell: %s", err)
+	}
+
+	sendCommandToServer(session, pipeIn)
+	log.Print("session end")
+}
+
+func sendCommandToServer(session *ssh.Session, in io.WriteCloser) {
+	for {
+		reader := bufio.NewReader(os.Stdin)
+		str, err := reader.ReadString('\n')
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = fmt.Fprint(in, str)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if str == exitCommand {
+			session.Close()
+			return
+		}
+	}
 }
 
 func getDefaultPrivateKey() string {
